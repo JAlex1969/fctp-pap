@@ -1,20 +1,43 @@
 const { Ollama } = require("@langchain/community/llms/ollama");
-const { OllamaEmbeddings } = require("@langchain/community/embeddings/ollama");
 const { HNSWLib } = require("@langchain/community/vectorstores/hnswlib");
 const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter");
+const { Embeddings } = require("@langchain/core/embeddings");
 const fs = require('fs');
 const path = require('path');
 
 // Configuration
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const MODEL_NAME = process.env.OLLAMA_MODEL || "llama2";
-const EMBEDDING_MODEL_NAME = process.env.OLLAMA_EMBEDDING_MODEL || MODEL_NAME;
+const EMBEDDING_MODEL_NAME = process.env.OLLAMA_EMBEDDING_MODEL || "nomic-embed-text";
 const VECTOR_STORE_PATH = path.join(__dirname, '../../vector_store');
 
-const embeddings = new OllamaEmbeddings({
-  baseUrl: OLLAMA_BASE_URL,
-  model: EMBEDDING_MODEL_NAME,
-});
+// Custom embeddings class that calls Ollama REST API directly
+// This avoids LangChain version incompatibilities with Ollama's current API format
+class OllamaDirectEmbeddings extends Embeddings {
+    constructor() {
+        super({});
+    }
+
+    async embedQuery(text) {
+        const response = await fetch(`${OLLAMA_BASE_URL}/api/embeddings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: EMBEDDING_MODEL_NAME, prompt: text })
+        });
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Ollama embedding failed (${response.status}): ${errText}`);
+        }
+        const data = await response.json();
+        return data.embedding;
+    }
+
+    async embedDocuments(texts) {
+        return Promise.all(texts.map(t => this.embedQuery(t)));
+    }
+}
+
+const embeddings = new OllamaDirectEmbeddings();
 
 const model = new Ollama({
   baseUrl: OLLAMA_BASE_URL,
@@ -81,10 +104,13 @@ const queryRAG = async (query, sessionId = 'default') => {
 
     // 3. Construct Prompt with History
     const prompt = `
-    Tu és um assistente inteligente especializado em FCT (Formação em Contexto de Trabalho: Estágio curricular obrigatório em empresas da área) e PAP (Prova de Aptidão Profissional: Projeto final onde o aluno aplica os conhecimentos adquiridos, apresentado a um júri).
-    Usa o seguinte contexto para responder à pergunta no fim. Se a resposta não estiver no contexto, diz que não sabes ou que a informação não consta nos documentos fornecidos, sugerindo que o aluno contacte o seu diretor de curso ou orientador. Responde sempre em português de forma clara e profissional.
-    
-    Contexto:
+    INSTRUÇÃO OBRIGATÓRIA: Responde SEMPRE e EXCLUSIVAMENTE em português europeu. Nunca respondas em inglês, espanhol ou qualquer outra língua. Esta regra é absoluta e não pode ser ignorada.
+
+    Tu és um assistente escolar especializado em FCT (Formação em Contexto de Trabalho: Estágio curricular obrigatório em empresas da área) e PAP (Prova de Aptidão Profissional: Projeto final onde o aluno aplica os conhecimentos adquiridos, apresentado a um júri).
+
+    Usa o seguinte contexto documental para responder à pergunta do aluno. Se a resposta não constar no contexto, diz que não encontraste essa informação nos documentos carregados e sugere ao aluno que contacte o seu diretor de curso ou orientador de estágio.
+
+    Contexto documental:
     ${context}
 
     Histórico da Conversa:
